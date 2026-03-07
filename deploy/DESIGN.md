@@ -540,3 +540,76 @@ The YAML playbook has extensive conditional blocks for special topologies. These
 - **Testable** — each phase can be unit tested independently
 - **Reusable** — facts gathering can be shared with test fixtures
 - **Maintainable** — conditionals as Python if/else vs nested YAML `when:` blocks
+# Gap Analysis: YAML playbook vs Python rewrite
+
+## MISSING from Python implementation
+
+### HIGH priority (will break deploy or produce wrong results)
+
+| # | YAML Step | Description | Where to add |
+|---|-----------|-------------|--------------|
+| 1 | Pre-connect (lines 37-60) | **IPv4 reachability pre-check** — tries IPv4, auto-falls back to IPv6 if unreachable. Saves `original_ipv4_address`. Without this, can't connect to IPv6-only DUTs at all. | `deploy_minigraph.py` (before creating SonicHost) |
+| 2 | Line 89-112 | **Load IPv6 group_vars** — `include_vars: "group_vars/{{ group_names[1] }}/ipv6.yml"` and override ntp_servers, dns_servers, syslog_servers, tacacs_servers, snmp_servers, forced_mgmt_routes, tacacs_group, tacacs_passkey with IPv6 variants | `facts_gatherer.py` (step 13 is a stub) |
+| 3 | Lines 119-125 | **Set target_mgmt_ip and mgmt_subnet_mask_length=64** for IPv6 mgmt | `facts_gatherer.py` |
+| 4 | Line 579 | **include_vars: "vars/topo_{{ topo }}.yml"** — loads topology-specific variables that the Jinja2 template needs. Without this, template rendering will fail because vars like `configuration`, `DUT`, etc. won't be in scope. | `minigraph_deployer.py` — CRITICAL, template can't render without these vars |
+| 5 | Lines 196-201 | **Find supervisor DUT** (card_type=='supervisor') and get asics_present from it. Passed to topo_facts. | `facts_gatherer.py` |
+| 6 | Lines 203-204 | **topo_facts missing params**: `asics_present` and `card_type` are not passed to topo_facts call | `facts_gatherer.py` (step 4) |
+| 7 | Lines 265-280 | **VoQ chassis facts from all DUTs in play_batch**: `all_sysports`, `all_inbands`, `all_inbands_ipv6`, `all_loopback4096`, `all_loopback4096_ipv6`, `all_slots` — loops over ALL DUTs. Python only processes one DUT at a time. | `facts_gatherer.py` + `deploy_minigraph.py` (need cross-DUT fact aggregation) |
+| 8 | Lines 652-686 | **Core analyzer: account_key and https_proxy** — reads from `corefile_uploader` vault variable, writes into `core_analyzer.rc.json` via lineinfile with backrefs, enables+starts `core_uploader.service`. Python has a stub. | `minigraph_deployer.py` |
+| 9 | Lines 740-758 | **Copy smartswitch_t1.json** to `/tmp/smartswitch.json` — happens BEFORE golden_config_db generation, not during post_deploy | `minigraph_deployer.py` (before generate_golden_config_db) |
+| 10 | Lines 745-750 | **Copy dhcp_server_mx.json** to `/tmp/dhcp_server.json` for mx topo | `minigraph_deployer.py` |
+| 11 | Lines 224-226 | **port_alias: switchids and sort_by_index params** missing. `sort_by_index=false` when `switch_type==voq and type==kvm` | `facts_gatherer.py` |
+| 12 | Lines 228-237 | **port_alias from localhost** (delegate_to localhost) when `deploy=false` — different params including `slotid` | `facts_gatherer.py` |
+
+### MEDIUM priority (edge cases, specific topologies)
+
+| # | YAML Step | Description | Where to add |
+|---|-----------|-------------|--------------|
+| 13 | Lines 169-183 | **L1 switch configuration** (include_tasks: config_l1_testbed.yml) for Ixia testbeds with configure_l1 | `facts_gatherer.py` or new file |
+| 14 | Lines 210-215 | **conn_graph_group override** for ixia testbed (uses testbed_facts['inv_name']) and **forced_mgmt_routes** param | `facts_gatherer.py` |
+| 15 | Lines 318-320 | **config_simulated_y_cable.yml** include for dualtor — generates simulated Y-cable config | `facts_gatherer.py` or new dualtor handler |
+| 16 | Lines 322-334 | **enable_tunnel_qos_remap** flag for T1 dualtor (hwsku in ACS-MSN4600C, Arista-7260CX3-C64) | `facts_gatherer.py` |
+| 17 | Lines 336-342 | **enable_compute_ai_deployment** flag for Cisco 8111/8122 HWSKUs with 'isolated' topo | `facts_gatherer.py` |
+| 18 | Lines 363-364 | **portchannel_config** from `vm_topo_config['DUT']['portchannel_config']` for T0 | `facts_gatherer.py` |
+| 19 | Lines 396-407 | **VoQ asic_topo_config remap** — remaps asic_topo_config to current slot only | `facts_gatherer.py` |
+| 20 | Lines 610-633 | **init_cfg_profile block** — loads config from init_cfg_profiles.yml, copies config_db.json instead of minigraph template | `minigraph_deployer.py` |
+| 21 | Lines 769-799 | **BCM DNX SOC properties adjustment** for Nokia-IXR7250 T2 — adjusts appl_param_active_links_thr_high based on active fabric cards | `minigraph_deployer.py` |
+| 22 | Lines 810-823 | **Macsec profile** — copies profile.json and golden_config_db_t2.j2, then runs generate_golden_config_db with macsec_profile param for T2 | `minigraph_deployer.py` |
+| 23 | Lines 887-888 | **config reload -y** when init_cfg_profile is defined (instead of load_minigraph) | `minigraph_deployer.py` |
+| 24 | Lines 738 | **Re-run port_alias for mx topo** right before cleanup block | `minigraph_deployer.py` |
+| 25 | Lines 960-970 | **NTP TimeoutSec for T2 KVM** — adds TimeoutSec=600 to ntpsec.service, daemon-reload | `post_deploy.py` |
+| 26 | Lines 990-998 | **Remove PortChannel IPs for t1-filterleaf-lag** | `post_deploy.py` |
+
+### LOW priority (debug/logging, unlikely to affect function)
+
+| # | YAML Step | Description | Where to add |
+|---|-----------|-------------|--------------|
+| 27 | Line 691 | **docker ps** debug status after core analyzer | cosmetic |
+| 28 | Line 127-131 | **Debug IPv6 management configuration** message | cosmetic |
+| 29 | Lines 220-221 | **Set type="unknown"** when hostvars type not defined | `facts_gatherer.py` |
+| 30 | Lines 356 | **Set VM_topo** flag (VM vs PTF) — used only for testbed_vm_info condition | implicit in Python |
+
+## PRESENT but INCOMPLETE
+
+| Item | Issue |
+|------|-------|
+| **Core analyzer** (`minigraph_deployer.py`) | Stub only — doesn't read corefile_uploader vault vars, doesn't write account_key/https_proxy, doesn't enable/start service |
+| **IPv6 mgmt** (`facts_gatherer.py`) | Has placeholder comment but doesn't actually load group_vars ipv6.yml or override service configs |
+| **topo_facts call** | Missing `asics_present` and `card_type` parameters |
+| **port_alias call** | Missing `switchids` and `sort_by_index` parameters; no localhost fallback for deploy=false |
+| **conn_graph_facts call** | Missing `group` and `forced_mgmt_routes` parameters |
+| **Template rendering** | No mechanism to inject topo vars (from `vars/topo_{{ topo }}.yml`) into template context — this is the biggest functional gap |
+| **Start topology service** | Condition is `num_asics > 1` but YAML uses `start_topo_service` host var with retries (3 retries, delay 10) |
+| **Golden config for T2+macsec** | Only handles basic case, missing macsec-specific second call |
+| **Smartswitch config** | Copies dpu_extra.json in post_deploy but YAML also copies smartswitch_t1.json to /tmp/smartswitch.json BEFORE golden config generation |
+| **dual_tor_facts call** | Missing `vlan_config` parameter |
+| **mux_cable_facts call** | Missing `vlan_config` parameter |
+
+## ORDERING ISSUES
+
+| Issue | YAML Order | Python Order |
+|-------|------------|--------------|
+| **BMP vs BGP startup** | BMP check → BMP enable → static routes → BGP startup | NTP → BMP → BGP startup (correct) |
+| **Smartswitch copy** | Copy smartswitch_t1.json BEFORE golden_config_db → Copy dpu_extra.json AFTER BGP startup | Python puts all smartswitch in post_deploy (too late for golden_config_db) |
+| **SNMP vs golden_config** | SNMP lineinfile → docker ps → topology service → cleanup → port_alias mx → preload → dhcp_server mx → smartswitch json → DNS config → SOC adjust → golden_config_db | Python has SNMP → core analyzer → topology → golden_config → DNS → cleanup → preload (some reordering) |
+| **Configlet copy vs apply** | Copy configlet files during deploy block, apply_clet.sh during post-deploy | Same (correct split) |
