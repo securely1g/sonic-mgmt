@@ -3,6 +3,11 @@ import pytest
 from tests.conftest import _neighbor_type_option_provided, _resolve_neighbor_type_for_testbed
 
 
+pytestmark = [
+    pytest.mark.topology("any"),
+]
+
+
 @pytest.mark.parametrize(
     "requested,testbed_name,provided,expected",
     [
