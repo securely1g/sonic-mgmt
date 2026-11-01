@@ -4932,11 +4932,9 @@ route/:
 
 route/test_default_route.py:
   skip:
-    reason: "Does not apply to standalone topos. Skip on vs due to known issue with multiple threads"
-    conditions_logical_operator: or
+    reason: "Does not apply to standalone topos."
     conditions:
       - "'standalone' in topo_name"
-      - "asic_type in ['vs'] and https://github.com/sonic-net/sonic-mgmt/issues/22336"
 
 route/test_default_route.py::test_default_route_set_src:
   xfail:
@@ -4945,6 +4943,10 @@ route/test_default_route.py::test_default_route_set_src:
       - "https://github.com/sonic-net/sonic-buildimage/issues/24537 and 't0-isolated-d256u256s2' in topo_name"
 
 route/test_default_route.py::test_default_route_with_bgp_flap:
+  skip:
+    reason: "Skip on vs due to known issue with multiple threads"
+    conditions:
+      - "asic_type in ['vs'] and https://github.com/sonic-net/sonic-mgmt/issues/22336"
   xfail:
     reason: "xfail for IPv6-only topologies, need add support for IPv6-only. Or test case has issue on the t0-isolated-d256u256s2 topo."
     conditions_logical_operator: or
