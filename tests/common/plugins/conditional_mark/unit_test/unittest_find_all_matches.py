@@ -1,6 +1,7 @@
 import logging
+from pathlib import Path
 import unittest
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 from tests.common.plugins.conditional_mark import find_all_matches, load_conditions
 
 logger = logging.getLogger(__name__)
@@ -366,6 +367,80 @@ class TestFindAllMatches(unittest.TestCase):
             "test_everflow_reorder_mark.py::test_everflow_reorder_mark_extra[ipv4-erspan_ipv4-default]",
         ):
             self.assertFalse(collect_marks(nodeid), "unexpected match for {}".format(nodeid))
+
+
+class TestDefaultRouteConditions(unittest.TestCase):
+    """Use production YAML and matcher with cached, controlled issue states."""
+
+    MODULE = 'route/test_default_route.py'
+    READ_ONLY = ('test_default_route_set_src', 'test_default_ipv6_route_next_hop_global_address')
+    FLAP = 'test_default_route_with_bgp_flap'
+    ISSUE = 'https://github.com/sonic-net/sonic-mgmt/issues/22336'
+
+    def marks(self, case, asic='vs', topo='t0', topo_type='t0', issue_open=True):
+        session = MagicMock()
+        session.config.option.mark_conditions_files = [str(
+            Path(__file__).resolve().parents[1] / 'tests_mark_conditions.yaml')]
+        cache = {'ISSUE_STATUS': {
+            self.ISSUE: issue_open,
+            'https://github.com/sonic-net/sonic-buildimage/issues/24537': True,
+            'https://github.com/sonic-net/sonic-mgmt/issues/19925': True,
+        }}
+        session.config.cache.get.side_effect = lambda key, default=None: cache.get(key, default)
+        facts = {'asic_type': asic, 'topo_name': topo, 'topo_type': topo_type,
+                 'platform': 'x86_64-nvidia_sn5640-r0'}
+        conditions = load_conditions(session)
+        with patch('tests.common.plugins.conditional_mark.check_issues',
+                   side_effect=AssertionError('Unit tests must not query issue services')):
+            matches = find_all_matches(self.MODULE + '::' + case, conditions, session, False, facts)
+        return {name: details for match in matches for marks in match.values()
+                for name, details in marks.items()}
+
+    def test_vs_read_only_cases_are_not_quarantined(self):
+        for case in self.READ_ONLY:
+            for suffix in ('', '[sonic-pr64-vs-None]'):
+                with self.subTest(case=case, suffix=suffix):
+                    self.assertEqual(self.marks(case + suffix), {})
+
+    def test_vs_threaded_flap_remains_quarantined(self):
+        marks = self.marks(self.FLAP)
+        self.assertEqual(set(marks), {'skip'})
+        self.assertTrue(any(self.ISSUE in condition for condition in marks['skip']['conditions']))
+
+    def test_physical_dual_stack_cases_remain_eligible(self):
+        for case in (*self.READ_ONLY, self.FLAP):
+            with self.subTest(case=case):
+                self.assertEqual(self.marks(case, asic='mellanox'), {})
+
+    def test_standalone_still_skips_the_whole_module(self):
+        for asic in ('vs', 'mellanox'):
+            for case in (*self.READ_ONLY, self.FLAP):
+                with self.subTest(asic=asic, case=case):
+                    self.assertIn('skip', self.marks(case, asic=asic, topo='t0-standalone-32'))
+
+    def test_issue_closure_does_not_remove_standalone_skip(self):
+        self.assertEqual(self.marks(self.FLAP, issue_open=False), {})
+        for case in (*self.READ_ONLY, self.FLAP):
+            with self.subTest(case=case):
+                self.assertIn('skip', self.marks(case, topo='t0-standalone-32', issue_open=False))
+
+    def test_existing_ipv6_flap_xfail_is_preserved(self):
+        self.assertEqual(set(self.marks(self.FLAP, topo='t0-v6-64')), {'skip', 'xfail'})
+        self.assertEqual(set(self.marks(self.FLAP, asic='mellanox', topo='t0-v6-64')), {'xfail'})
+        for case in self.READ_ONLY:
+            with self.subTest(case=case):
+                self.assertEqual(self.marks(case, topo='t0-v6-64'), {})
+
+    def test_existing_isolated_topology_xfails_are_preserved(self):
+        for case in (self.READ_ONLY[0], self.FLAP):
+            with self.subTest(case=case):
+                self.assertEqual(set(self.marks(case, asic='mellanox',
+                                                topo='t0-isolated-d256u256s2')), {'xfail'})
+
+    def test_bmc_route_skip_is_unchanged(self):
+        for case in (*self.READ_ONLY, self.FLAP):
+            with self.subTest(case=case):
+                self.assertIn('skip', self.marks(case, asic='mellanox', topo_type='bmc'))
 
 
 if __name__ == "__main__":
